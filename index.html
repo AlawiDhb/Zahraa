@@ -1735,7 +1735,7 @@ async function initRoom(){
   clearInterval(presT);clearInterval(keepT);presT=setInterval(sendPresence,120);keepT=setInterval(()=>{lastSent=''},4000);
   updOnline();
 }
-$('online').addEventListener('click',e=>{e.stopPropagation();if(!IN_CLAUDE&&!ROOM){guide(`ندور على العائلة برمز ${famCode()}… لازم كل الأجهزة يكون فيها نفس الرمز`);return}if(!ROOM)guide('عشان تلعبون مع بعض، لازم كل جهاز يفتح اللعبة وهو مسجّل دخول في Claude، وبعدين تفتحون نفس الرابط');else{const n=Object.keys(remote).length;guide(n?`معك في العالم ${n} من العائلة 💖`:'ما في أحد ثاني الحين. خلي بابا أو ماما يفتحون نفس الرابط')}});
+$('online').addEventListener('click',e=>{e.stopPropagation();if(!IN_CLAUDE&&!ROOM){guide(`${netDetail||'أدور على العائلة'} (رمز العائلة ${famCode()})`);return}if(!IN_CLAUDE){const n=Object.keys(remote).length;guide(n?`معك في العالم ${n} من العائلة 💖 (الرمز ${famCode()})`:`متصلة، بس ما في أحد ثاني برمز ${famCode()}. تأكدوا إن الرمز نفسه في كل الأجهزة`);return}if(!ROOM)guide('عشان تلعبون مع بعض، لازم كل جهاز يفتح اللعبة وهو مسجّل دخول في Claude، وبعدين تفتحون نفس الرابط');else{const n=Object.keys(remote).length;guide(n?`معك في العالم ${n} من العائلة 💖`:'ما في أحد ثاني الحين. خلي بابا أو ماما يفتحون نفس الرابط')}});
 function myTap(){myWave=Date.now();if(myRole==='z'&&heroModel)heroModel.st.wave=1.4;popEmoji('👋',hero.x,6.4,hero.z);if(myRole==='z')say(Math.random()<.5?'v01':'v14');else chime()}
 
 /* character picker */
@@ -1924,9 +1924,31 @@ function becomeClient(){
     c.on('close',()=>{if(gen!==PN.gen)return;netDown();setTimeout(()=>{if(gen===PN.gen)becomeHost()},1200+Math.random()*1800)})});
   p.on('error',e=>{if(gen!==PN.gen)return;netDown();setTimeout(()=>{if(gen===PN.gen)becomeHost()},(e&&e.type==='peer-unavailable'?800:4000)+Math.random()*1500)});
 }
-async function initPeerNet(){roomState='trying';updOnline();clearInterval(presT);clearInterval(keepT);presT=setInterval(sendPresence,120);keepT=setInterval(()=>{lastSent=''},4000);if(!await loadPeerJS()){roomState='off';updOnline();return}becomeHost()}
+
+/* relay through a public messaging server (works on networks that block direct device links) */
+const MQ={c:null,id:Math.random().toString(36).slice(2,10),peers:{},t:null,topic:null,tries:0};let netDetail='';
+function loadMQ(){return new Promise(res=>{if(window.mqtt)return res(true);const s=document.createElement('script');s.src='https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js';s.onload=()=>res(!!window.mqtt);s.onerror=()=>res(false);document.head.appendChild(s)})}
+const BROKERS=['wss://broker.hivemq.com:8884/mqtt','wss://broker.emqx.io:8084/mqtt','wss://test.mosquitto.org:8081'];
+const MQ_ROOM={presence:async s=>{if(MQ.c&&MQ.c.connected)try{MQ.c.publish(MQ.topic+'/p',JSON.stringify({id:MQ.id,p:s}),{qos:0})}catch(e){}}};
+function mqStop(){clearInterval(MQ.t);if(MQ.c){try{MQ.c.publish(MQ.topic+'/bye',MQ.id);MQ.c.end(true)}catch(e){}}MQ.c=null;MQ.peers={}}
+async function initMQ(i=0){
+  if(!await loadMQ()){netDetail='ما قدرت أحمّل أداة الاتصال';peerFallback();return}
+  mqStop();MQ.topic='zahra-game-v1/fam-'+famCode();const url=BROKERS[i%BROKERS.length];let opened=false;netDetail='أتصل بالخادم…';
+  let c;try{c=mqtt.connect(url,{clientId:'zg_'+MQ.id+'_'+i,clean:true,connectTimeout:8000,reconnectPeriod:3000,keepalive:20,will:{topic:MQ.topic+'/bye',payload:MQ.id,qos:0,retain:false}})}catch(e){if(i+1<BROKERS.length)initMQ(i+1);else peerFallback();return}
+  MQ.c=c;
+  c.on('connect',()=>{opened=true;netDetail='';c.subscribe(MQ.topic+'/#');ROOM=MQ_ROOM;roomState='on';roomConn=true;lastSent='';updOnline()});
+  c.on('message',(t,buf)=>{const s=buf.toString();if(t.endsWith('/bye')){delete MQ.peers[s];return}try{const m=JSON.parse(s);if(!m||typeof m.id!=='string'||m.id===MQ.id||!m.p||typeof m.p!=='object')return;MQ.peers[m.id]={p:m.p,t:Date.now()}}catch(e){}});
+  c.on('offline',()=>{roomConn=false;netDetail='انقطع الاتصال، أحاول أرجع…';updOnline()});
+  c.on('reconnect',()=>{updOnline()});
+  setTimeout(()=>{if(opened||MQ.c!==c)return;try{c.end(true)}catch(e){}if(i+1<BROKERS.length)initMQ(i+1);else{netDetail='الشبكة حاجبة الخادم، أجرب طريقة ثانية';peerFallback()}},9000);
+  clearInterval(MQ.t);MQ.t=setInterval(()=>{const now=Date.now();for(const k in MQ.peers)if(now-MQ.peers[k].t>7000)delete MQ.peers[k];if(ROOM===MQ_ROOM)syncPeers(Object.entries(MQ.peers).map(([id,v])=>({peer:id,sameTab:false,isMe:false,kind:'viewer',presence:v.p})))},200);
+}
+async function peerFallback(){mqStop();if(ROOM===MQ_ROOM)ROOM=null;if(!await loadPeerJS()){roomState='off';netDetail='ما قدرت أتصل. جرب شبكة واي فاي ثانية';updOnline();return}becomeHost()}
+addEventListener('pagehide',()=>{try{MQ.c&&MQ.c.publish(MQ.topic+'/bye',MQ.id)}catch(e){}});
+
+async function initPeerNet(){roomState='trying';updOnline();clearInterval(presT);clearInterval(keepT);presT=setInterval(sendPresence,120);keepT=setInterval(()=>{lastSent=''},4000);initMQ(0)}
 function famUI(){const f=$('fam');if(IN_CLAUDE){f.hidden=true;return}f.hidden=false;const inp=$('famIn');inp.value=famCode();
-  inp.onchange=()=>{const v=inp.value.replace(/\D/g,'').slice(0,6);if(v.length>=3){try{localStorage.setItem('zahra-fam',v)}catch(e){}inp.value=v;if(started)becomeHost()}else inp.value=famCode()}}
+  inp.onchange=()=>{const v=inp.value.replace(/\D/g,'').slice(0,6);if(v.length>=3){try{localStorage.setItem('zahra-fam',v)}catch(e){}inp.value=v;if(started){peerDrop();initMQ(0)}}else inp.value=famCode()}}
 
 let last=performance.now();
 function loop(now){let dt=(now-last)/1000;last=now;if(!(dt>0))dt=.016;dt=Math.min(.05,dt);drawIfx(dt);
